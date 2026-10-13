@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the first, unchanged-CoR CWQ baseline experiment.
+"""Run the first, unchanged-CoR Phase 1 baseline experiment.
 
 The input files are inference-safe structural subsets.  Gold answers are used
 only after inference for evaluation; gold structure metadata is never passed
@@ -113,9 +113,8 @@ OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "experiments" / "cor_baseline"
 SUBSET_ROOT = PROJECT_ROOT / "outputs" / "subsets"
 
 SUBSETS = {
-    "cwq_linear": {"path": SUBSET_ROOT / "cwq_linear.jsonl", "sample_size": 50},
     "cwq_branch_2": {"path": SUBSET_ROOT / "cwq_branch_2.jsonl", "sample_size": 50},
-    "cwq_branch_3_plus": {"path": SUBSET_ROOT / "cwq_branch_3_plus.jsonl", "sample_size": None},
+    "grailqa_branch_2": {"path": SUBSET_ROOT / "grailqa_branch_2.jsonl", "sample_size": 50},
 }
 
 
@@ -390,6 +389,7 @@ def write_summary(summaries: dict[str, dict[str, Any]], output_path: Path) -> No
 def build_config(args: argparse.Namespace, selected_ids: dict[str, list[str]]) -> dict[str, Any]:
     return {
         "experiment": "cor_baseline",
+        "phase": "phase_1",
         "branch": "experiment/cor-baseline",
         "method": "cor",
         "model": os.getenv("MODEL_NAME", ""),
@@ -414,11 +414,7 @@ def build_config(args: argparse.Namespace, selected_ids: dict[str, list[str]]) -
         "random_seed": args.seed,
         "subset_files": {name: str(spec["path"]) for name, spec in SUBSETS.items()},
         "selected_ids": selected_ids,
-        "sampling": {
-            "cwq_linear": 50,
-            "cwq_branch_2": 50,
-            "cwq_branch_3_plus": "all available",
-        },
+        "sampling": {name: spec["sample_size"] for name, spec in SUBSETS.items()},
     }
 
 
@@ -433,6 +429,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature-reasoning", type=float, default=0.1)
     parser.add_argument("--max-token", type=int, default=512)
     parser.add_argument("--remove-unnecessary-rel", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="reuse completed JSONL rows under --output-root and continue from the first missing row",
+    )
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO")
     return parser.parse_args()
 
@@ -486,16 +487,28 @@ def main() -> None:
     for subset_name, rows in selected_rows.items():
         results_path = output_root / f"{subset_name}_results.jsonl"
         detail_dir = output_root / "details" / subset_name
-        if results_path.exists():
+        existing: dict[str, dict[str, Any]] = {}
+        if args.resume and results_path.exists():
+            for line in results_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                saved = json.loads(line)
+                existing[str(saved.get("id", ""))] = saved
+        elif results_path.exists():
             results_path.unlink()
         results: list[dict[str, Any]] = []
         logging.info("Running %s: %d examples", subset_name, len(rows))
         for index, row in enumerate(rows, start=1):
-            logging.info("[%s] %d/%d id=%s", subset_name, index, len(rows), row.get("id"))
-            result = run_one(agent, row, detail_dir)
+            example_id = str(row.get("id", ""))
+            if example_id in existing:
+                result = existing[example_id]
+                logging.info("[%s] %d/%d already complete id=%s", subset_name, index, len(rows), example_id)
+            else:
+                logging.info("[%s] %d/%d id=%s", subset_name, index, len(rows), example_id)
+                result = run_one(agent, row, detail_dir)
+                with results_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(result, ensure_ascii=False) + "\n")
             results.append(result)
-            with results_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(result, ensure_ascii=False) + "\n")
         all_results[subset_name] = results
         summaries[subset_name] = summarize(results)
 

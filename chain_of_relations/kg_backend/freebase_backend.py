@@ -74,4 +74,7 @@ class FreebaseBackend:
 		return f"ns:{entity_id}"
 
 	def format_relation_node(self, relation_id: str) -> str:
-		return f"ns:{relation_id}"
+		text = str(relation_id or "").strip()
+		if text.startswith(("http://", "https://")):
+			return f"<{text}>"
+		return f"ns:{text}"
