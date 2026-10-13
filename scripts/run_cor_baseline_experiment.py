@@ -29,6 +29,9 @@ import certifi
 
 from _bootstrap import PROJECT_ROOT  # noqa: E402
 
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 
 class _RawOpenAIClient:
     """Small Chat Completions-compatible client used by this experiment only.
