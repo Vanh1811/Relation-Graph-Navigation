@@ -10,6 +10,7 @@
 
 from pathlib import Path
 import logging
+import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -110,6 +111,7 @@ class CoRAgent:
 			"filtered_candidate_size": item.get("filtered_candidate_size", -1),
 			"response": item.get("response", ""),
 			"parsed_result": item.get("parsed_result", ""),
+			"answers": item.get("answers", []),
 		}
 
 	def _load_prompts(self, prompt_file: str) -> Dict[str, Dict[str, str]]:
@@ -191,6 +193,19 @@ class CoRAgent:
 		if not text:
 			return []
 		return [part.strip() for part in re.split(r",|;", text) if part.strip()]
+
+	@staticmethod
+	def _structured_answers(text: Optional[str]) -> List[str]:
+		"""Return JSON answer-list items without splitting punctuation in labels."""
+		if not text:
+			return []
+		try:
+			payload = json.loads(text)
+		except (TypeError, ValueError):
+			return []
+		if not isinstance(payload, dict) or not isinstance(payload.get("answer"), list):
+			return []
+		return [str(item).strip() for item in payload["answer"] if str(item).strip()]
 
 	@staticmethod
 	def _build_result_items(
@@ -442,6 +457,9 @@ class CoRAgent:
 					"status": out.query_status,
 					"timed_out": out.timed_out,
 					"filter_caused_empty": out.filter_caused_empty,
+					"candidate_entity_ids": list(out.entity_ids),
+					"candidate_entity_names": list(out.entity_names),
+					"literal_candidates": list(out.literal_entities),
 				}
 			)
 		)
@@ -500,7 +518,7 @@ class CoRAgent:
 		relation_chain: List[Relation],
 		target_entity_names: List[str],
 		prompt_history: List[Dict[str, Any]],
-	) -> Optional[str]:
+	) -> Any:
 		try:
 			user_prompt = self._get_user_prompt("filter")
 			system_prompt = self._get_system_prompt("filter")
@@ -548,7 +566,10 @@ class CoRAgent:
 				}
 			)
 		)
-		return out.result if out.result else None
+		structured_answers = self._structured_answers(out.response)
+		if prompt_history:
+			prompt_history[-1]["answers"] = structured_answers
+		return structured_answers if structured_answers else (out.result if out.result else None)
 
 	def generate_directly(self, question: str, prompt_history: List[Dict[str, Any]]) -> str:
 		out = generate_directly(
@@ -784,7 +805,11 @@ class CoRAgent:
 						last_event = prompt_history[-1]
 						if last_event.get("type") == "filter_answer":
 							step_history.append(self._llm_event_to_step(last_event))
-					result = self._split_answers(filter_response or "")
+					result = (
+						list(filter_response)
+						if isinstance(filter_response, list)
+						else self._split_answers(filter_response or "")
+					)
 					if result:
 						logging.info("[CoR][depth=%s] filter accepted answers=%s | chain=%s", current_depth, len(result), chain_sig)
 						mapped_results = self._map_answer_names_to_results(

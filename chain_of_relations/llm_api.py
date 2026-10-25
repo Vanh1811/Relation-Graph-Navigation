@@ -22,7 +22,7 @@ class LLMAPI(object):
         
         # 从环境变量读取配置
         self.api_key = os.getenv("OPENAI_API_KEY")
-        self.base_url = os.getenv("OPENAI_BASE_URL")
+        self.base_url = (os.getenv("OPENAI_BASE_URL") or "").strip()
         self.timeout = float(os.getenv("OPENAI_TIMEOUT", "30"))
         self.max_retries = int(os.getenv("OPENAI_MAX_RETRIES", "3"))
         self.retry_interval = float(os.getenv("OPENAI_RETRY_INTERVAL", "1"))
@@ -33,19 +33,21 @@ class LLMAPI(object):
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY not found in environment variables")
         
-        # 统一初始化OpenAI客户端（支持所有兼容OpenAI接口的服务商）
-        if self.base_url:
-            self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-            logging.info(
-                f"Initialized OpenAI client with model: {self.model_name}, "
-                f"base_url: {self.base_url}, timeout: {self.timeout}s"
-            )
-        else:
-            self.client = OpenAI(api_key=self.api_key)
-            logging.info(
-                f"Initialized OpenAI client with model: {self.model_name}, "
-                f"timeout: {self.timeout}s"
-            )
+        # The wrapper owns retry behavior, so disable the SDK's additional
+        # automatic retries.  Otherwise one logical attempt can become three
+        # HTTP attempts inside the SDK before the wrapper retries again.
+        effective_base_url = self.base_url or "https://api.openai.com/v1"
+        client_kwargs = {
+            "api_key": self.api_key,
+            "base_url": effective_base_url,
+            "timeout": self.timeout,
+            "max_retries": 0,
+        }
+        self.client = OpenAI(**client_kwargs)
+        logging.info(
+            f"Initialized OpenAI client with model: {self.model_name}, "
+            f"base_url: {effective_base_url}, timeout: {self.timeout}s"
+        )
 
     def generate(self, user_prompt, temperature=0.01, max_tokens=256, system_prompt=None):
         """
@@ -60,18 +62,29 @@ class LLMAPI(object):
         messages.append({"role": "user", "content": user_prompt})
 
         last_error = None
+        modern_model = str(self.model_name).startswith(("gpt-5", "gpt-6"))
         request_kwargs = {
             "model": self.model_name,
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "frequency_penalty": 0,
-            "presence_penalty": 0,
             "stream": False,
             "timeout": self.timeout,
         }
-        if str(self.model_name).startswith("gpt-5"):
+        # Current reasoning models reject max_tokens and require the renamed
+        # max_completion_tokens field.  Keep the public Python argument named
+        # max_tokens so existing callers remain unchanged.
+        if modern_model:
+            # Current reasoning models use their fixed/default sampling
+            # behavior and reject non-default temperature values (as well as
+            # legacy sampling controls).  Keep only supported controls.
+            request_kwargs["max_completion_tokens"] = max_tokens
             request_kwargs["reasoning_effort"] = os.getenv("OPENAI_REASONING_EFFORT", "low")
+        else:
+            request_kwargs.update({
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "frequency_penalty": 0,
+                "presence_penalty": 0,
+            })
 
         usage = {
             "input_tokens": 0,
@@ -106,8 +119,11 @@ class LLMAPI(object):
                 )
             except Exception as e:
                 last_error = e
+                cause = getattr(e, "__cause__", None)
+                cause_text = f"; cause={cause!r}" if cause else ""
                 logging.error(
-                    f"API error ({e}), retry {attempt}/{self.max_retries}"
+                    f"API error ({type(e).__name__}: {e}{cause_text}), "
+                    f"retry {attempt}/{self.max_retries}"
                 )
 
             if attempt < self.max_retries:
