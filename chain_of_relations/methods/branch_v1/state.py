@@ -1,4 +1,4 @@
-"""State objects for the Phase 1 two-branch prototype."""
+"""State objects shared by the frozen Branch-v1 and adaptive routing runs."""
 
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,7 +19,7 @@ class RelationGraphState:
 	merge_operator: str = "AND"
 
 	def __post_init__(self) -> None:
-		if len(self.branches) != 2:
-			raise ValueError("RelationGraphState requires exactly two branches")
+		if len(self.branches) not in (2, 3):
+			raise ValueError("RelationGraphState requires two or three branches")
 		if self.merge_operator != "AND":
-			raise ValueError("Branch-v1 supports only the AND merge operator")
+			raise ValueError("Branch execution supports only the AND merge operator")
